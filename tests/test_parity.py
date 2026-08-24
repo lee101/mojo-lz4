@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from mojo_lz4 import block, frame
-from mojo_lz4._lib import buffer_address
+from mojo_lz4._lib import buffer_address, xxh32
 from mojo_lz4._lib import decompress_into
 
 
@@ -89,6 +89,19 @@ def test_simd_match_extension_tail(tail):
     assert upstream_block.decompress(encoded, uncompressed_size=len(source)) == source
 
 
+@pytest.mark.parametrize("size", [0, 1, 15, 16, 17, 31, 32, 33, 255])
+def test_simd_xxh32_tail(size):
+    source = bytes((i * 37 + 11) & 0xFF for i in range(size))
+    encoded = frame.compress(source, content_checksum=True)
+    assert upstream_frame.decompress(encoded) == source
+
+
+def test_xxh32_published_vectors():
+    assert xxh32(b"") == 0x02CC5D05
+    assert xxh32(b"a") == 0x550D7456
+    assert xxh32(b"abc") == 0x32D153FF
+
+
 @pytest.mark.parametrize("writable", [False, True])
 def test_numpy_input_crosses_ffi_without_materializing_bytes(writable):
     source = np.arange(300_000, dtype=np.uint8)
@@ -167,6 +180,28 @@ def test_frame_compression_supports_every_claimed_block_size(block_size):
     source = payload(5_000_000)[:5_000_000]
     encoded = frame.compress(source, block_size=block_size)
     assert upstream_frame.decompress(encoded) == source
+
+
+@pytest.mark.parametrize(("size", "parallel"), [(131_071, False), (131_072, True)])
+def test_frame_parallel_threshold(monkeypatch, size, parallel):
+    source = b"a" * size
+    calls = 0
+    original = frame.compress_blocks_raw
+    monkeypatch.setattr(frame, "_PARALLEL_MIN_SIZE", 131_072)
+
+    def tracked(data, block_size, acceleration):
+        nonlocal calls
+        calls += 1
+        return original(data, block_size, acceleration)
+
+    monkeypatch.setattr(frame, "compress_blocks_raw", tracked)
+    encoded = frame.compress(
+        source,
+        block_size=frame.BLOCKSIZE_MAX64KB,
+        block_linked=False,
+    )
+    assert upstream_frame.decompress(encoded) == source
+    assert bool(calls) is parallel
 
 
 @pytest.mark.parametrize(

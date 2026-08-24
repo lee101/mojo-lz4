@@ -54,6 +54,9 @@ def main():
     random_data = np.random.default_rng(7).integers(
         0, 256, size=size, dtype=np.uint8
     ).tobytes()
+    large_random_data = np.random.default_rng(11).integers(
+        0, 256, size=128 * 1024 * 1024, dtype=np.uint8
+    ).tobytes()
 
     upstream_text_block = upstream_block.compress(text, store_size=False)
     upstream_random_block = upstream_block.compress(random_data, store_size=False)
@@ -62,6 +65,13 @@ def main():
         block_size=upstream_frame.BLOCKSIZE_MAX4MB,
         block_linked=False,
         store_size=False,
+    )
+    upstream_text_checksum_frame = upstream_frame.compress(
+        text,
+        block_size=upstream_frame.BLOCKSIZE_MAX4MB,
+        block_linked=False,
+        store_size=False,
+        content_checksum=True,
     )
 
     cases = [
@@ -109,9 +119,46 @@ def main():
             ),
         ),
         (
+            "frame compress, random 128 MiB",
+            lambda: frame.compress(
+                large_random_data,
+                block_size=frame.BLOCKSIZE_MAX4MB,
+                block_linked=False,
+                store_size=False,
+            ),
+            lambda: upstream_frame.compress(
+                large_random_data,
+                block_size=upstream_frame.BLOCKSIZE_MAX4MB,
+                block_linked=False,
+                store_size=False,
+            ),
+        ),
+        (
             "frame decompress, repetitive 8 MiB",
             lambda: frame.decompress(upstream_text_frame),
             lambda: upstream_frame.decompress(upstream_text_frame),
+        ),
+        (
+            "frame compress + checksum, repetitive 8 MiB",
+            lambda: frame.compress(
+                text,
+                block_size=frame.BLOCKSIZE_MAX4MB,
+                block_linked=False,
+                store_size=False,
+                content_checksum=True,
+            ),
+            lambda: upstream_frame.compress(
+                text,
+                block_size=upstream_frame.BLOCKSIZE_MAX4MB,
+                block_linked=False,
+                store_size=False,
+                content_checksum=True,
+            ),
+        ),
+        (
+            "frame decompress + checksum, repetitive 8 MiB",
+            lambda: frame.decompress(upstream_text_checksum_frame),
+            lambda: upstream_frame.decompress(upstream_text_checksum_frame),
         ),
     ]
 

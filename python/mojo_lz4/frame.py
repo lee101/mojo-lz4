@@ -13,6 +13,7 @@ from ._lib import (
     as_buffer,
     as_bytes,
     buffer_address,
+    compress_blocks_raw,
     compress_raw,
     decompress_into,
     lib,
@@ -36,6 +37,8 @@ _BLOCK_SIZES = {
     BLOCKSIZE_MAX1MB: 1024 * 1024,
     BLOCKSIZE_MAX4MB: 4 * 1024 * 1024,
 }
+
+_PARALLEL_MIN_SIZE = 128 * 1024 * 1024
 
 
 class LZ4FrameError(RuntimeError):
@@ -74,20 +77,27 @@ def _header(
     return MAGIC + descriptor + bytes(((xxh32(descriptor) >> 8) & 0xFF,))
 
 
-def _encode_blocks(
+def _encode_block_parts(
     data: bytes,
     block_size: int,
     compression_level: int,
     block_checksum: bool,
-) -> bytes:
+):
     maximum = _BLOCK_SIZES[_block_id(block_size)]
     acceleration = max(1, -int(compression_level)) if compression_level < 0 else 1
-    parts: list[bytes] = []
-    for start in range(0, len(data), maximum):
+    parts: list[bytes | memoryview] = []
+    starts = range(0, len(data), maximum)
+    if len(data) >= _PARALLEL_MIN_SIZE and len(data) > maximum:
+        encoded_blocks = compress_blocks_raw(data, maximum, acceleration)
+    else:
+        encoded_blocks = [
+            compress_raw(memoryview(data)[start : start + maximum], acceleration=acceleration)
+            for start in starts
+        ]
+    for start, encoded in zip(starts, encoded_blocks, strict=True):
         raw = memoryview(data)[start : start + maximum]
-        encoded = compress_raw(raw, acceleration=acceleration)
         if len(encoded) >= len(raw):
-            payload = raw.tobytes()
+            payload = raw
             size_field = len(raw) | 0x80000000
         else:
             payload = encoded
@@ -96,7 +106,18 @@ def _encode_blocks(
         parts.append(payload)
         if block_checksum:
             parts.append(struct.pack("<I", xxh32(payload)))
-    return b"".join(parts)
+    return parts
+
+
+def _encode_blocks(
+    data: bytes,
+    block_size: int,
+    compression_level: int,
+    block_checksum: bool,
+) -> bytes:
+    return b"".join(
+        _encode_block_parts(data, block_size, compression_level, block_checksum)
+    )
 
 
 def compress(
@@ -118,12 +139,16 @@ def compress(
         bool(content_checksum),
         bool(block_checksum),
     )
-    encoded = header + _encode_blocks(
-        source, block_size, int(compression_level), bool(block_checksum)
+    parts = [header]
+    parts.extend(
+        _encode_block_parts(
+            source, block_size, int(compression_level), bool(block_checksum)
+        )
     )
-    encoded += b"\0\0\0\0"
+    parts.append(b"\0\0\0\0")
     if content_checksum:
-        encoded += struct.pack("<I", xxh32(source))
+        parts.append(struct.pack("<I", xxh32(source)))
+    encoded = b"".join(parts)
     _ = auto_flush
     return bytearray(encoded) if return_bytearray else encoded
 

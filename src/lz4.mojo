@@ -1,9 +1,11 @@
 """LZ4 block codec and xxHash32 kernels exposed through a small C ABI."""
 
+from max.algorithm import parallelize
 from std.sys.info import simd_width_of as simdwidthof
 
 comptime BPtr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
 comptime I32Ptr = UnsafePointer[Int32, AnyOrigin[mut=True]]
+comptime I64Ptr = UnsafePointer[Int64, AnyOrigin[mut=True]]
 
 
 @always_inline
@@ -164,6 +166,38 @@ def compress_block(
     return op + literal_size
 
 
+def compress_blocks(
+    src: BPtr,
+    src_size: Int,
+    dst: BPtr,
+    dst_stride: Int,
+    tables: I32Ptr,
+    results: I64Ptr,
+    block_size: Int,
+    acceleration: Int,
+) -> Int:
+    var block_count = (src_size + block_size - 1) // block_size
+
+    @parameter
+    def compress_one(block: Int):
+        var offset = block * block_size
+        var size = min(block_size, src_size - offset)
+        results[block] = Int64(
+            compress_block(
+                src + offset,
+                size,
+                0,
+                dst + block * dst_stride,
+                dst_stride,
+                tables + block * 65536,
+                acceleration,
+            )
+        )
+
+    parallelize[compress_one](block_count, min(block_count, 4))
+    return block_count
+
+
 def decompress_block(
     src: BPtr,
     src_size: Int,
@@ -232,32 +266,34 @@ def decompress_block(
     return op - initial_size
 
 
-@always_inline
-def xxh_round(acc: UInt32, lane: UInt32) -> UInt32:
-    var value = acc + lane * UInt32(2246822519)
-    return rotate_left(value, 13) * UInt32(2654435761)
-
-
 def xxh32(src: BPtr, size: Int, seed: UInt32) -> UInt32:
     var ip = 0
     var h: UInt32
     if size >= 16:
-        var v1 = seed + UInt32(2654435761) + UInt32(2246822519)
-        var v2 = seed + UInt32(2246822519)
-        var v3 = seed
-        var v4 = seed - UInt32(2654435761)
-        while ip + 16 <= size:
-            v1 = xxh_round(v1, read32(src, ip))
-            v2 = xxh_round(v2, read32(src, ip + 4))
-            v3 = xxh_round(v3, read32(src, ip + 8))
-            v4 = xxh_round(v4, read32(src, ip + 12))
-            ip += 16
-        h = (
-            rotate_left(v1, 1)
-            + rotate_left(v2, 7)
-            + rotate_left(v3, 12)
-            + rotate_left(v4, 18)
+        comptime W = simdwidthof[DType.float64]()
+        var accumulators = SIMD[DType.uint32, W](
+            seed + UInt32(2654435761) + UInt32(2246822519),
+            seed + UInt32(2246822519),
+            seed,
+            seed - UInt32(2654435761),
         )
+        var words = src.bitcast[UInt32]()
+        while ip + 16 <= size:
+            accumulators += (
+                words.load[width=W, alignment=1](ip // 4)
+                * SIMD[DType.uint32, W](2246822519)
+            )
+            accumulators = (
+                (accumulators << SIMD[DType.uint32, W](13))
+                | (accumulators >> SIMD[DType.uint32, W](19))
+            ) * SIMD[DType.uint32, W](2654435761)
+            ip += 16
+        h = SIMD[DType.uint32, W](
+            rotate_left(accumulators[0], 1),
+            rotate_left(accumulators[1], 7),
+            rotate_left(accumulators[2], 12),
+            rotate_left(accumulators[3], 18),
+        ).reduce_add()
     else:
         h = seed + UInt32(374761393)
 
@@ -313,6 +349,29 @@ def mlz_decompress(
         BPtr(unsafe_from_address=dst_addr),
         dst_capacity,
         initial_size,
+    )
+
+
+@export("mlz_compress_blocks")
+def mlz_compress_blocks(
+    src_addr: Int,
+    src_size: Int,
+    dst_addr: Int,
+    dst_stride: Int,
+    table_addr: Int,
+    result_addr: Int,
+    block_size: Int,
+    acceleration: Int,
+) abi("C") -> Int:
+    return compress_blocks(
+        BPtr(unsafe_from_address=src_addr),
+        src_size,
+        BPtr(unsafe_from_address=dst_addr),
+        dst_stride,
+        I32Ptr(unsafe_from_address=table_addr),
+        I64Ptr(unsafe_from_address=result_addr),
+        block_size,
+        acceleration,
     )
 
 

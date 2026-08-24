@@ -60,6 +60,7 @@ class _BufferExport:
 
 _SIGNATURES = {
     "mlz_compress": ([I, I, I, I, I, I, I], I),
+    "mlz_compress_blocks": ([I, I, I, I, I, I, I, I], I),
     "mlz_decompress": ([I, I, I, I, I], I),
     "mlz_xxh32": ([I, I, I], I),
 }
@@ -159,6 +160,14 @@ def _hash_table():
     return table
 
 
+def _batch_hash_tables(count: int):
+    tables = getattr(_thread_state, "batch_hash_tables", None)
+    if tables is None or len(tables) < count * 65536:
+        tables = (ctypes.c_int32 * (count * 65536))()
+        _thread_state.batch_hash_tables = tables
+    return tables
+
+
 def xxh32(data, seed: int = 0) -> int:
     seed = int(seed)
     if not 0 <= seed <= 0xFFFFFFFF:
@@ -203,6 +212,47 @@ def compress_raw(data, acceleration: int = 1, dictionary=None) -> bytes:
     if result < 0:
         raise LibraryError(f"compression failed with error {result}")
     return destination[:result]
+
+
+def compress_blocks_raw(
+    data, block_size: int, acceleration: int = 1
+) -> list[bytes | memoryview]:
+    source_address, source_size, keepalive = buffer_address(data)
+    if source_size > _LZ4_MAX_INPUT_SIZE:
+        raise OverflowError("LZ4 block input exceeds the format limit")
+    if block_size <= 0:
+        raise ValueError("block_size must be positive")
+    acceleration = int(acceleration)
+    if not 1 <= acceleration <= _I64_MAX:
+        raise OverflowError("acceleration is outside the native ABI range")
+    count = (source_size + block_size - 1) // block_size
+    if count < 2:
+        return [compress_raw(data, acceleration=acceleration)] if count else []
+    stride = block_size + block_size // 255 + 16
+    destination, destination_address = writable_bytes(stride * count)
+    tables = _batch_hash_tables(count)
+    results = (ctypes.c_int64 * count)()
+    completed = lib().mlz_compress_blocks(
+        source_address,
+        source_size,
+        destination_address,
+        stride,
+        ctypes.addressof(tables),
+        ctypes.addressof(results),
+        block_size,
+        acceleration,
+    )
+    _ = keepalive
+    if completed != count:
+        raise LibraryError("parallel compression did not complete every block")
+    storage = memoryview(destination)
+    blocks = []
+    for index, result in enumerate(results):
+        if result < 0:
+            raise LibraryError(f"compression failed with error {result}")
+        start = index * stride
+        blocks.append(storage[start : start + result])
+    return blocks
 
 
 def decompress_raw(data, capacity: int, dictionary=None) -> bytes:
