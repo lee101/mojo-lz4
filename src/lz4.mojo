@@ -1,6 +1,5 @@
 """LZ4 block codec and xxHash32 kernels exposed through a small C ABI."""
 
-from max.algorithm import parallelize
 from std.sys.info import simd_width_of as simdwidthof
 
 comptime BPtr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
@@ -178,8 +177,10 @@ def compress_blocks(
 ) -> Int:
     var block_count = (src_size + block_size - 1) // block_size
 
-    @parameter
-    def compress_one(block: Int):
+    # Hash-chained block compression is a byte walk: well under two operations
+    # per byte, and each block owns a 256 KiB hash table, so threads only add
+    # cache pressure. Run the blocks serially.
+    for block in range(block_count):
         var offset = block * block_size
         var size = min(block_size, src_size - offset)
         results[block] = Int64(
@@ -193,8 +194,6 @@ def compress_blocks(
                 acceleration,
             )
         )
-
-    parallelize[compress_one](block_count, min(block_count, 4))
     return block_count
 
 
