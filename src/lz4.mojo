@@ -18,7 +18,7 @@ def copy_bytes(
     comptime BYTE_W = simdwidthof[DType.float64]() * 8
     var i = 0
     while i + BYTE_W <= size:
-        var values = src.load[width=BYTE_W, alignment=1](src_pos + i)
+        var values = src.unsafe_load[width=BYTE_W, alignment=1](src_pos + i)
         dst.store[alignment=1](dst_pos + i, values)
         i += BYTE_W
     while i < size:
@@ -102,10 +102,10 @@ def compress_block(
         var match_size = 4
         comptime BYTE_W = simdwidthof[DType.float64]() * 8
         while ip + match_size + BYTE_W <= src_size - 5:
-            var match_values = src.load[width=BYTE_W, alignment=1](
+            var match_values = src.unsafe_load[width=BYTE_W, alignment=1](
                 match_pos + match_size
             )
-            var input_values = src.load[width=BYTE_W, alignment=1](
+            var input_values = src.unsafe_load[width=BYTE_W, alignment=1](
                 ip + match_size
             )
             if match_values != input_values:
@@ -279,7 +279,7 @@ def xxh32(src: BPtr, size: Int, seed: UInt32) -> UInt32:
         var words = src.bitcast[UInt32]()
         while ip + 16 <= size:
             accumulators += (
-                words.load[width=W, alignment=1](ip // 4)
+                words.unsafe_load[width=W, alignment=1](ip // 4)
                 * SIMD[DType.uint32, W](2246822519)
             )
             accumulators = (
